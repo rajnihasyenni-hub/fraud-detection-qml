@@ -1,0 +1,2 @@
+model,n_qubits,train_size,test_size,precision,recall,f1_score,true_negatives,false_positives,false_negatives,true_positives
+Quantum Kernel SVM (ZZFeatureMap),4,140,60,0.9130434782608695,0.7,0.7924528301886793,28,2,9,21

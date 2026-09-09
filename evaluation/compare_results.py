@@ -13,21 +13,21 @@ Run this AFTER both baseline_model.py and quantum_kernel_svm.py have
 been run at least once (their CSVs need to exist).
 """
 
+from pathlib import Path
+
 import pandas as pd
 import matplotlib.pyplot as plt
 import os
 
-# ---------------------------------------------------------
-# 1. Load both results files
-# ---------------------------------------------------------
-classical_path = "../classical_baseline/classical_baseline_results.csv"
-quantum_path = "../quantum/quantum_kernel_results.csv"
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+classical_path = PROJECT_ROOT / "classical_baseline" / "classical_baseline_results.csv"
+quantum_path = PROJECT_ROOT / "quantum" / "quantum_kernel_results.csv"
 
-if not os.path.exists(classical_path):
+if not classical_path.exists():
     raise FileNotFoundError(
         f"Can't find {classical_path}. Run classical_baseline/baseline_model.py first."
     )
-if not os.path.exists(quantum_path):
+if not quantum_path.exists():
     raise FileNotFoundError(
         f"Can't find {quantum_path}. Run quantum/quantum_kernel_svm.py first."
     )

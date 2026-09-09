@@ -15,6 +15,8 @@ scaler was fit on the full dataset before the split, letting test-set
 statistics leak into training.
 """
 
+from pathlib import Path
+
 import pandas as pd
 import numpy as np
 from sklearn.model_selection import train_test_split
@@ -27,10 +29,17 @@ from sklearn.metrics import (
 import matplotlib.pyplot as plt
 import seaborn as sns
 
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+DATA_PATH = PROJECT_ROOT / "data" / "creditcard.csv"
+OUTPUT_DIR = PROJECT_ROOT / "classical_baseline"
+
+if not DATA_PATH.exists():
+    raise FileNotFoundError(f"Dataset not found at {DATA_PATH}. Download creditcard.csv into the data/ folder first.")
+
 # ---------------------------------------------------------
 # 1. Load data
 # ---------------------------------------------------------
-df = pd.read_csv("creditcard.csv")
+df = pd.read_csv(DATA_PATH)
 
 print("Dataset shape:", df.shape)
 print("Fraud cases:", df['Class'].sum(), "out of", len(df))
@@ -138,6 +147,7 @@ results = {
 }
 
 results_df = pd.DataFrame([results])
-results_df.to_csv('classical_baseline_results.csv', index=False)
-print("\nSaved metrics: classical_baseline_results.csv")
+results_path = OUTPUT_DIR / 'classical_baseline_results.csv'
+results_df.to_csv(results_path, index=False)
+print(f"\nSaved metrics: {results_path}")
 print("\nDone. Push this file + the CSV + the PNG to the repo under classical_baseline/")

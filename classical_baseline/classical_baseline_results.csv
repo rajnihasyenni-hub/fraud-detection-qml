@@ -1,0 +1,2 @@
+model,precision,recall,f1_score,roc_auc,true_negatives,false_positives,false_negatives,true_positives
+Random Forest (classical baseline),0.7297297297297297,0.826530612244898,0.7751196172248804,0.9834630496824504,56834,30,17,81
