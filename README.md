@@ -71,6 +71,23 @@ This reframing is naturally more robust to class imbalance, because it doesn't n
 - Compare against classical baselines: Logistic Regression, Random Forest, XGBoost, Isolation Forest.
 
 ---
+## 📁 Repository Structure
+
+```
+fraud-detection-qml/
+├── README.md
+├── data/                    ← Hasini
+│   └── preprocessing.ipynb
+├── classical_baseline/      ← Monisha
+│   └── baseline_model.ipynb
+├── quantum/
+│   ├── feature_map.ipynb    ← Venu
+│   └── qsvm_model.ipynb     ← Pratap
+├── evaluation/              ← Triveda
+│   └── comparison.ipynb
+└── results/                 ← everyone dumps final metrics/plots here
+
+```
 
 ## 🏗️ Architecture
 
