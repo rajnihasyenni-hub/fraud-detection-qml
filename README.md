@@ -178,7 +178,7 @@ python train_qrbm.py
 | _Venu_ | _Quantum Feature Map_ |
 | _Pratap_ | _Quantum Kernel + SVM_ |
 | _Triveda_ | _Evaluation & Comparison_ |
-| _Nihas_ | _Git, Docs & Presentation_ |
+| _Nihas_ | _Git & Docs_ |
 
 ---
 
