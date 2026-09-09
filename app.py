@@ -1,459 +1,1037 @@
 """
-QuantumGuard — Quantum-Enhanced Credit Card Fraud Detection
+QuantumGuard
+Quantum-Enhanced Credit Card Fraud Detection
 
-This app combines a classical baseline, a quantum-inspired QRBM, and a quantum-kernel SVM.
+Streamlit dashboard for:
+- Credit card fraud detection
+- PCA dimensionality reduction
+- Quantum feature encoding
+- QRBM-style energy anomaly detection
+- AUPRC / F1 / Recall / FNR evaluation
 """
 
-import os
+import io
 
 import numpy as np
 import pandas as pd
-import plotly.graph_objects as go
 import streamlit as st
-from qiskit.circuit.library import ZZFeatureMap
-from qiskit_machine_learning.kernels import FidelityQuantumKernel
-from sklearn.decomposition import PCA
-from sklearn.ensemble import RandomForestClassifier
-from sklearn.metrics import f1_score, precision_score, recall_score
+import plotly.graph_objects as go
+
 from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import MinMaxScaler, StandardScaler
-from sklearn.svm import SVC
-from sklearn.utils import resample
+from sklearn.preprocessing import StandardScaler, MinMaxScaler
+from sklearn.decomposition import PCA
+from sklearn.metrics import (
+    precision_score,
+    recall_score,
+    f1_score,
+    confusion_matrix,
+)
 
-from quantum.qrbm import compute_auprc, compute_false_negative_rate, predict_qrbm, train_qrbm
+from quantum.qrbm import (
+    compute_auprc,
+    compute_false_negative_rate,
+    predict_qrbm,
+    train_qrbm,
+)
+
 
 # ============================================================
-# PAGE CONFIG + STYLING
+# PAGE CONFIG
 # ============================================================
+
 st.set_page_config(
-    page_title="QuantumGuard — Fraud Detection",
+    page_title="QuantumGuard",
     page_icon="🛡️",
     layout="wide",
-    initial_sidebar_state="expanded",
 )
 
-st.markdown(
+
+# ============================================================
+# TITLE
+# ============================================================
+
+st.title("🛡️ QuantumGuard")
+
+st.subheader(
+    "Quantum-Enhanced Credit Card Fraud Detection"
+)
+
+st.write(
     """
-    <style>
-        .hero { text-align: center; padding: 1.2rem 0 1rem 0; }
-        .hero h1 {
-            font-size: 3rem;
-            background: linear-gradient(90deg, #7B61FF, #FF61D8);
-            -webkit-background-clip: text;
-            -webkit-text-fill-color: transparent;
-            font-weight: 800;
-            margin-bottom: 0.2rem;
-        }
-        .hero p { color: #9CA3AF; font-size: 1.03rem; }
-        .metric-card {
-            background: rgba(123, 97, 255, 0.09);
-            border: 1px solid rgba(123, 97, 255, 0.25);
-            border-radius: 16px;
-            padding: 1.2rem;
-            text-align: center;
-        }
-        .badge {
-            display: inline-block;
-            padding: 0.35rem 0.9rem;
-            border-radius: 999px;
-            font-weight: 600;
-            font-size: 0.9rem;
-        }
-        .badge-fraud {
-            background: rgba(255, 72, 72, 0.15);
-            color: #FF6B6B;
-            border: 1px solid rgba(255, 72, 72, 0.4);
-        }
-        .badge-legit {
-            background: rgba(72, 255, 150, 0.12);
-            color: #4ADE80;
-            border: 1px solid rgba(72, 255, 150, 0.4);
-        }
-    </style>
-    """,
-    unsafe_allow_html=True,
-)
-
-st.markdown(
+    A hybrid classical–quantum inspired pipeline for detecting
+    rare fraudulent transactions using dimensionality reduction,
+    quantum feature encoding and energy-based anomaly detection.
     """
-    <div class="hero">
-        <h1>🛡️ QuantumGuard</h1>
-        <p>Quantum-Enhanced Credit Card Fraud Detection · Qiskit Fall Fest 2026</p>
-    </div>
-    """,
-    unsafe_allow_html=True,
 )
 
-# ============================================================
-# DATA LOADING
-# ============================================================
-DATA_PATHS = ["creditcard.csv", "data/creditcard.csv", "../data/creditcard.csv"]
+st.divider()
 
-
-def find_data_path():
-    for path in DATA_PATHS:
-        if os.path.exists(path):
-            return path
-    return None
-
-
-@st.cache_data
-def load_data():
-    path = find_data_path()
-    if path is None:
-        return None
-    return pd.read_csv(path)
-
-
-df = load_data()
-if df is None:
-    st.error("creditcard.csv was not found. Put it next to app.py, inside data/, or in ../data/.")
-    st.stop()
-
-# ============================================================
-# CLASSICAL MODEL
-# ============================================================
-@st.cache_resource
-def train_classical_model(df):
-    d = df.copy()
-    scaler = StandardScaler()
-    d["Amount_scaled"] = scaler.fit_transform(d[["Amount"]])
-    d["Time_scaled"] = scaler.fit_transform(d[["Time"]])
-    d = d.drop(["Amount", "Time"], axis=1)
-
-    X = d.drop("Class", axis=1)
-    y = d["Class"]
-
-    X_train, X_test, y_train, y_test = train_test_split(
-        X, y, test_size=0.2, random_state=42, stratify=y
-    )
-
-    model = RandomForestClassifier(
-        n_estimators=200,
-        max_depth=12,
-        class_weight="balanced",
-        random_state=42,
-        n_jobs=-1,
-    )
-    model.fit(X_train, y_train)
-    y_pred = model.predict(X_test)
-
-    metrics = {
-        "precision": precision_score(y_test, y_pred),
-        "recall": recall_score(y_test, y_pred),
-        "f1": f1_score(y_test, y_pred),
-    }
-    return model, metrics, (X_test, y_test)
-
-# ============================================================
-# QRBM MODEL
-# ============================================================
-N_QUBITS = 4
-
-
-@st.cache_resource
-def train_qrbm_model(df, n_qubits=N_QUBITS):
-    fraud = df[df["Class"] == 1]
-    legit = df[df["Class"] == 0]
-
-    n_per_class = min(120, min(len(fraud), len(legit)))
-    fraud_sample = resample(fraud, n_samples=n_per_class, random_state=42, replace=False)
-    legit_sample = resample(legit, n_samples=n_per_class, random_state=42, replace=False)
-    balanced = pd.concat([fraud_sample, legit_sample]).sample(frac=1, random_state=42)
-
-    X = balanced.drop("Class", axis=1)
-    y = balanced["Class"].astype(int).values
-
-    pca = PCA(n_components=min(n_qubits, X.shape[1]), random_state=42)
-    X_reduced = pca.fit_transform(X)
-
-    X_train, X_test, y_train, y_test = train_test_split(
-        X_reduced, y, test_size=0.3, random_state=42, stratify=y
-    )
-
-    model = train_qrbm(X_train, y_train, n_hidden=6, learning_rate=0.08, epochs=50, seed=42)
-    preds, _, energy_scores = predict_qrbm(model, X_test, return_probabilities=True)
-
-    metrics = {
-        "precision": precision_score(y_test, preds, zero_division=0),
-        "recall": recall_score(y_test, preds, zero_division=0),
-        "f1": f1_score(y_test, preds, zero_division=0),
-        "auprc": compute_auprc(y_test, energy_scores),
-        "false_negative_rate": compute_false_negative_rate(y_test, preds),
-        "threshold": float(model["threshold"]),
-    }
-
-    return {"model": model, "pca": pca, "feature_columns": X.columns.tolist()}, metrics
-
-
-def qrbm_predict_single(row_features, bundle):
-    row = row_features[bundle["feature_columns"]].copy()
-    reduced = bundle["pca"].transform(row.to_frame().T)
-    preds, probs, energy_scores = predict_qrbm(bundle["model"], reduced, return_probabilities=True)
-    return int(preds[0]), float(probs[0]), float(energy_scores[0])
-
-# ============================================================
-# QUANTUM KERNEL SVM
-# ============================================================
-@st.cache_resource
-def train_quantum_model(df, n_per_class=80, n_qubits=4):
-    fraud = df[df["Class"] == 1]
-    legit = df[df["Class"] == 0]
-
-    fraud_sample = resample(fraud, n_samples=min(n_per_class, len(fraud)), random_state=42, replace=False)
-    legit_sample = resample(legit, n_samples=n_per_class, random_state=42, replace=False)
-    data = pd.concat([fraud_sample, legit_sample]).sample(frac=1, random_state=42)
-
-    X = data.drop("Class", axis=1)
-    y = data["Class"].values
-
-    pca = PCA(n_components=n_qubits, random_state=42)
-    X_reduced = pca.fit_transform(X)
-
-    scaler = MinMaxScaler(feature_range=(0, np.pi))
-    X_scaled = scaler.fit_transform(X_reduced)
-
-    X_train, X_test, y_train, y_test = train_test_split(
-        X_scaled, y, test_size=0.3, random_state=42, stratify=y
-    )
-
-    feature_map = ZZFeatureMap(feature_dimension=n_qubits, reps=2, entanglement="linear")
-    quantum_kernel = FidelityQuantumKernel(feature_map=feature_map)
-
-    kernel_train = quantum_kernel.evaluate(x_vec=X_train)
-    kernel_test = quantum_kernel.evaluate(x_vec=X_test, y_vec=X_train)
-
-    qsvm = SVC(kernel="precomputed", class_weight="balanced", probability=True)
-    qsvm.fit(kernel_train, y_train)
-    y_pred = qsvm.predict(kernel_test)
-
-    metrics = {
-        "precision": precision_score(y_test, y_pred, zero_division=0),
-        "recall": recall_score(y_test, y_pred, zero_division=0),
-        "f1": f1_score(y_test, y_pred, zero_division=0),
-    }
-
-    bundle = {
-        "qsvm": qsvm,
-        "kernel": quantum_kernel,
-        "pca": pca,
-        "scaler": scaler,
-        "X_train": X_train,
-        "feature_columns": X.columns.tolist(),
-    }
-    return bundle, metrics
-
-
-def quantum_predict_single(df_row_features, bundle):
-    row = df_row_features[bundle["feature_columns"]]
-    reduced = bundle["pca"].transform(row.to_frame().T)
-    scaled = bundle["scaler"].transform(reduced)
-    kernel_row = bundle["kernel"].evaluate(x_vec=scaled, y_vec=bundle["X_train"])
-    pred = bundle["qsvm"].predict(kernel_row)[0]
-    proba = bundle["qsvm"].predict_proba(kernel_row)[0][1]
-    return int(pred), float(proba)
-
-# ============================================================
-# TRAIN MODELS
-# ============================================================
-with st.spinner("Training classical baseline..."):
-    classical_model, classical_metrics, _ = train_classical_model(df)
-
-with st.spinner("Training QRBM..."):
-    qrbm_bundle, qrbm_metrics = train_qrbm_model(df)
-
-with st.spinner("Training quantum kernel SVM..."):
-    quantum_bundle, quantum_metrics = train_quantum_model(df)
 
 # ============================================================
 # SIDEBAR
 # ============================================================
-page = st.sidebar.radio("Navigate", ["📊 Dashboard", "🔍 Live Detector", "📘 Methodology"])
-st.sidebar.markdown("---")
-st.sidebar.markdown("**QuantumGuard Team**")
-st.sidebar.write("Monisha · Venu · Pratap · Triveda · Hasini · Nihas")
-st.sidebar.write("Qiskit Fall Fest 2026 · CUTM Vizianagaram")
+
+st.sidebar.header("Model Configuration")
+
+n_components = st.sidebar.slider(
+    "PCA components",
+    min_value=2,
+    max_value=8,
+    value=4,
+    step=1,
+)
+
+n_hidden = st.sidebar.slider(
+    "QRBM hidden units",
+    min_value=2,
+    max_value=8,
+    value=4,
+    step=1,
+)
+
+epochs = st.sidebar.slider(
+    "Training epochs",
+    min_value=10,
+    max_value=100,
+    value=40,
+    step=10,
+)
+
+learning_rate = st.sidebar.slider(
+    "Learning rate",
+    min_value=0.005,
+    max_value=0.10,
+    value=0.03,
+    step=0.005,
+)
+
+test_size = st.sidebar.slider(
+    "Test size",
+    min_value=0.10,
+    max_value=0.40,
+    value=0.20,
+    step=0.05,
+)
+
 
 # ============================================================
-# DASHBOARD
+# DATA LOADING
 # ============================================================
-if page == "📊 Dashboard":
-    st.markdown("### Model Performance Comparison")
 
-    metric_cols = st.columns(5)
-    for col, label, value in zip(
-        metric_cols,
-        ["Precision", "Recall", "F1 Score", "AUPRC", "False Negative Rate"],
+def generate_demo_data(
+    n_samples=2000,
+    n_features=12,
+    fraud_rate=0.05,
+    seed=42,
+):
+    """
+    Generate a synthetic credit-card-like dataset.
+
+    This allows the dashboard to run even before the real
+    Kaggle Credit Card Fraud Detection dataset is added.
+    """
+
+    rng = np.random.default_rng(seed)
+
+    n_fraud = max(
+        1,
+        int(n_samples * fraud_rate)
+    )
+
+    n_legitimate = (
+        n_samples - n_fraud
+    )
+
+    legitimate = rng.normal(
+        loc=0.0,
+        scale=1.0,
+        size=(n_legitimate, n_features),
+    )
+
+    fraud = rng.normal(
+        loc=1.8,
+        scale=1.3,
+        size=(n_fraud, n_features),
+    )
+
+    X = np.vstack(
         [
-            [classical_metrics["precision"], qrbm_metrics["precision"], quantum_metrics["precision"]],
-            [classical_metrics["recall"], qrbm_metrics["recall"], quantum_metrics["recall"]],
-            [classical_metrics["f1"], qrbm_metrics["f1"], quantum_metrics["f1"]],
-            [0.0, qrbm_metrics["auprc"], 0.0],
-            [0.0, qrbm_metrics["false_negative_rate"], 0.0],
-        ],
-    ):
-        with col:
-            if label in ["AUPRC", "False Negative Rate"]:
-                display_value = value[1]
-                formatted = f"{display_value:.2f}" if label == "AUPRC" else f"{display_value:.1%}"
-                markup = f"""
-                <div class="metric-card">
-                    <div style="color:#9CA3AF;font-size:0.82rem;">{label}</div>
-                    <div style="font-size:1.4rem;font-weight:700;">{formatted}</div>
-                    <div style="color:#7B61FF;font-size:0.75rem;">QRBM only</div>
-                </div>
-                """
-            else:
-                markup = f"""
-                <div class="metric-card">
-                    <div style="color:#9CA3AF;font-size:0.82rem;">{label}</div>
-                    <div style="font-size:1.5rem;font-weight:700;">
-                        {value[0]:.1%} · {value[1]:.1%} · {value[2]:.1%}
-                    </div>
-                    <div style="color:#7B61FF;font-size:0.75rem;">Classical · QRBM · Quantum</div>
-                </div>
-                """
-            st.markdown(markup, unsafe_allow_html=True)
+            legitimate,
+            fraud,
+        ]
+    )
 
-    fig = go.Figure()
-    names = ["Precision", "Recall", "F1 Score", "AUPRC", "FNR"]
-    fig.add_trace(
-        go.Bar(
-            name="Classical",
-            x=names,
-            y=[classical_metrics["precision"], classical_metrics["recall"], classical_metrics["f1"], 0.0, 0.0],
-            marker_color="#7B61FF",
+    y = np.concatenate(
+        [
+            np.zeros(n_legitimate),
+            np.ones(n_fraud),
+        ]
+    )
+
+    indices = rng.permutation(
+        len(X)
+    )
+
+    X = X[indices]
+    y = y[indices]
+
+    columns = [
+        f"V{i + 1}"
+        for i in range(n_features)
+    ]
+
+    df = pd.DataFrame(
+        X,
+        columns=columns,
+    )
+
+    df["Class"] = y.astype(int)
+
+    return df
+
+
+def load_uploaded_csv(uploaded_file):
+
+    return pd.read_csv(
+        uploaded_file
+    )
+
+
+# ============================================================
+# DATA SECTION
+# ============================================================
+
+st.header("1. Data Preparation")
+
+uploaded_file = st.file_uploader(
+    "Upload Credit Card Fraud CSV",
+    type=["csv"],
+)
+
+if uploaded_file is not None:
+
+    try:
+
+        df = load_uploaded_csv(
+            uploaded_file
         )
-    )
-    fig.add_trace(
-        go.Bar(
-            name="QRBM",
-            x=names,
-            y=[qrbm_metrics["precision"], qrbm_metrics["recall"], qrbm_metrics["f1"], qrbm_metrics["auprc"], qrbm_metrics["false_negative_rate"]],
-            marker_color="#36CFC9",
+
+        st.success(
+            "Dataset loaded successfully."
         )
-    )
-    fig.add_trace(
-        go.Bar(
-            name="Quantum Kernel SVM",
-            x=names,
-            y=[quantum_metrics["precision"], quantum_metrics["recall"], quantum_metrics["f1"], 0.0, 0.0],
-            marker_color="#FF61D8",
+
+    except Exception as exc:
+
+        st.error(
+            f"Could not read CSV: {exc}"
         )
-    )
-    fig.update_layout(
-        barmode="group",
-        template="plotly_dark",
-        paper_bgcolor="rgba(0,0,0,0)",
-        plot_bgcolor="rgba(0,0,0,0)",
-        yaxis=dict(tickformat=".0%", range=[0, 1]),
-        height=420,
-        legend=dict(orientation="h", yanchor="bottom", y=1.04, xanchor="right", x=1),
-    )
-    st.plotly_chart(fig, width="stretch")
+
+        st.stop()
+
+else:
+
+    df = generate_demo_data()
 
     st.info(
-        "This dashboard follows the README: a hybrid quantum-classical fraud detector that optimizes for recall, "
-        "calibrates a QRBM energy threshold, and evaluates precision, F1, AUPRC, and false-negative rate under class imbalance."
+        """
+        No CSV uploaded. QuantumGuard is currently using
+        a synthetic imbalanced fraud dataset for demonstration.
+
+        Upload the Kaggle Credit Card Fraud Detection CSV
+        to run the pipeline on real data.
+        """
     )
 
-    fraud_count = int(df["Class"].sum())
-    total = len(df)
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Total Transactions", f"{total:,}")
-    c2.metric("Fraud Cases", f"{fraud_count:,}")
-    c3.metric("Fraud Rate", f"{fraud_count / total:.3%}")
 
 # ============================================================
-# LIVE DETECTOR
+# FIND TARGET COLUMN
 # ============================================================
-elif page == "🔍 Live Detector":
-    st.markdown("### Predict on a Real Transaction")
-    st.markdown("Select a real transaction and compare the classical model, QRBM, and quantum kernel SVM outputs.")
 
-    fraud_pool = df[df["Class"] == 1].index.tolist()
-    legit_pool = df[df["Class"] == 0].index.tolist()
+target_candidates = [
+    "Class",
+    "class",
+    "Fraud",
+    "fraud",
+    "label",
+    "Label",
+]
 
-    sample_type = st.radio(
-        "Choose a transaction type:",
-        ["Random legitimate transaction", "Random fraudulent transaction"],
-        horizontal=True,
+target_column = None
+
+for column in target_candidates:
+
+    if column in df.columns:
+
+        target_column = column
+        break
+
+
+if target_column is None:
+
+    st.error(
+        """
+        Target column not found.
+
+        Your dataset must contain a fraud label such as:
+        Class, class, Fraud, fraud, label or Label.
+        """
     )
 
-    if st.button("Load Transaction & Predict", type="primary"):
-        idx = np.random.choice(fraud_pool if sample_type == "Random fraudulent transaction" else legit_pool)
-        row_full = df.loc[[idx]]
-        true_label = int(row_full["Class"].values[0])
-        row_features = row_full.drop("Class", axis=1)
+    st.stop()
 
-        d_row = row_features.copy()
-        d_row["Amount_scaled"] = d_row["Amount"]
-        d_row["Time_scaled"] = d_row["Time"]
-        d_row = d_row.drop(["Amount", "Time"], axis=1)
-        d_row = d_row[classical_model.feature_names_in_]
-        classical_pred = int(classical_model.predict(d_row)[0])
-        classical_proba = float(classical_model.predict_proba(d_row)[0][1])
-
-        with st.spinner("Running QRBM + quantum kernel evaluation..."):
-            qrbm_pred, qrbm_proba, qrbm_energy = qrbm_predict_single(row_features, qrbm_bundle)
-            quantum_pred, quantum_proba = quantum_predict_single(row_features, quantum_bundle)
-
-        st.markdown("---")
-        col_truth, col_classical, col_qrbm, col_quantum = st.columns(4)
-
-        with col_truth:
-            st.markdown("**Ground Truth**")
-            st.markdown(
-                '<span class="badge badge-fraud">FRAUD</span>' if true_label == 1 else '<span class="badge badge-legit">LEGITIMATE</span>',
-                unsafe_allow_html=True,
-            )
-            st.caption(f"Amount: ₹{row_full['Amount'].values[0]:.2f}")
-
-        with col_classical:
-            st.markdown("**Classical**")
-            st.markdown(
-                '<span class="badge badge-fraud">FRAUD</span>' if classical_pred == 1 else '<span class="badge badge-legit">LEGITIMATE</span>',
-                unsafe_allow_html=True,
-            )
-            st.caption(f"Confidence: {classical_proba:.1%}")
-
-        with col_qrbm:
-            st.markdown("**QRBM**")
-            st.markdown(
-                '<span class="badge badge-fraud">FRAUD</span>' if qrbm_pred == 1 else '<span class="badge badge-legit">LEGITIMATE</span>',
-                unsafe_allow_html=True,
-            )
-            st.caption(f"Energy score: {qrbm_energy:.4f}")
-            st.caption(f"Threshold: {qrbm_bundle['model']['threshold']:.4f}")
-            st.caption(f"Confidence: {qrbm_proba:.1%}")
-
-        with col_quantum:
-            st.markdown("**Quantum Kernel**")
-            st.markdown(
-                '<span class="badge badge-fraud">FRAUD</span>' if quantum_pred == 1 else '<span class="badge badge-legit">LEGITIMATE</span>',
-                unsafe_allow_html=True,
-            )
-            st.caption(f"Confidence: {quantum_proba:.1%}")
 
 # ============================================================
-# METHODOLOGY PAGE
+# CLEAN DATA
 # ============================================================
-else:
-    st.markdown("### Project Methodology")
-    st.write(
-        "This project follows the README concept for a hybrid quantum-classical fraud detection system: "
-        "scale the transaction features, reduce the dimensionality to a compact quantum-feasible representation, "
-        "calibrate a QRBM energy threshold, and compare different decision models under class imbalance."
+
+df = df.copy()
+
+df = df.replace(
+    [np.inf, -np.inf],
+    np.nan,
+)
+
+df = df.dropna(
+    axis=0
+)
+
+# Remove duplicate rows.
+df = df.drop_duplicates()
+
+
+# ============================================================
+# NUMERIC FEATURES
+# ============================================================
+
+feature_columns = [
+    column
+    for column in df.columns
+    if column != target_column
+    and pd.api.types.is_numeric_dtype(
+        df[column]
+    )
+]
+
+if len(feature_columns) < 2:
+
+    st.error(
+        "At least two numeric feature columns are required."
     )
 
-    st.markdown("#### 1. Data preparation")
-    st.write("The app uses the anonymized credit-card dataset, with normalization for Amount and Time and balanced sampling for the quantum models to match the README’s class-imbalance handling strategy.")
+    st.stop()
 
-    st.markdown("#### 2. Quantum feature encoding")
-    st.write("The quantum kernel model uses a ZZFeatureMap to embed transaction patterns into a Hilbert-space representation suitable for quantum similarity analysis.")
 
-    st.markdown("#### 3. QRBM energy model")
-    st.write("The QRBM is implemented as a lightweight energy-based anomaly detector: it learns the normal transaction energy landscape and flags outliers above a calibrated threshold as potential fraud.")
+X = df[feature_columns].values
 
-    st.markdown("#### 4. Evaluation")
-    st.write("The app reports precision, recall, F1 score, AUPRC, and false-negative rate to reflect the README’s focus on malignly imbalanced fraud detection and cost of missed fraud cases.")
+y = (
+    df[target_column]
+    .astype(int)
+    .values
+)
+
+
+# ============================================================
+# DATASET INFORMATION
+# ============================================================
+
+col1, col2, col3, col4 = st.columns(4)
+
+with col1:
+
+    st.metric(
+        "Transactions",
+        f"{len(df):,}"
+    )
+
+with col2:
+
+    fraud_count = int(
+        np.sum(y == 1)
+    )
+
+    st.metric(
+        "Fraud cases",
+        f"{fraud_count:,}"
+    )
+
+with col3:
+
+    legitimate_count = int(
+        np.sum(y == 0)
+    )
+
+    st.metric(
+        "Legitimate cases",
+        f"{legitimate_count:,}"
+    )
+
+with col4:
+
+    fraud_rate = (
+        np.mean(y == 1) * 100
+    )
+
+    st.metric(
+        "Fraud rate",
+        f"{fraud_rate:.2f}%"
+    )
+
+
+with st.expander(
+    "View dataset"
+):
+
+    st.dataframe(
+        df.head(100),
+        use_container_width=True,
+    )
+
+
+# ============================================================
+# CLASS DISTRIBUTION
+# ============================================================
+
+st.subheader(
+    "Class Distribution"
+)
+
+class_counts = (
+    pd.Series(y)
+    .value_counts()
+    .sort_index()
+)
+
+fig_class = go.Figure()
+
+fig_class.add_trace(
+    go.Bar(
+        x=[
+            "Legitimate",
+            "Fraud",
+        ],
+        y=[
+            class_counts.get(0, 0),
+            class_counts.get(1, 0),
+        ],
+    )
+)
+
+fig_class.update_layout(
+    title="Transaction Class Distribution",
+    xaxis_title="Class",
+    yaxis_title="Number of Transactions",
+)
+
+st.plotly_chart(
+    fig_class,
+    use_container_width=True,
+)
+
+
+# ============================================================
+# TRAIN / TEST SPLIT
+# ============================================================
+
+st.header(
+    "2. Classical Pre-processing"
+)
+
+try:
+
+    X_train, X_test, y_train, y_test = train_test_split(
+        X,
+        y,
+        test_size=test_size,
+        random_state=42,
+        stratify=y,
+    )
+
+except ValueError:
+
+    X_train, X_test, y_train, y_test = train_test_split(
+        X,
+        y,
+        test_size=test_size,
+        random_state=42,
+    )
+
+
+# ============================================================
+# STANDARDIZATION
+# ============================================================
+
+scaler = StandardScaler()
+
+X_train_scaled = scaler.fit_transform(
+    X_train
+)
+
+X_test_scaled = scaler.transform(
+    X_test
+)
+
+
+# ============================================================
+# PCA
+# ============================================================
+
+actual_components = min(
+    n_components,
+    X_train_scaled.shape[1],
+    X_train_scaled.shape[0],
+)
+
+pca = PCA(
+    n_components=actual_components,
+    random_state=42,
+)
+
+X_train_pca = pca.fit_transform(
+    X_train_scaled
+)
+
+X_test_pca = pca.transform(
+    X_test_scaled
+)
+
+explained_variance = (
+    np.sum(
+        pca.explained_variance_ratio_
+    )
+    * 100
+)
+
+
+col1, col2 = st.columns(2)
+
+with col1:
+
+    st.metric(
+        "Original features",
+        X_train.shape[1],
+    )
+
+with col2:
+
+    st.metric(
+        "PCA components",
+        actual_components,
+    )
+
+st.info(
+    f"PCA retains approximately "
+    f"{explained_variance:.2f}% of the variance."
+)
+
+
+# ============================================================
+# PCA VISUALIZATION
+# ============================================================
+
+if actual_components >= 2:
+
+    fig_pca = go.Figure()
+
+    normal_mask = (
+        y_test == 0
+    )
+
+    fraud_mask = (
+        y_test == 1
+    )
+
+    fig_pca.add_trace(
+        go.Scatter(
+            x=X_test_pca[normal_mask, 0],
+            y=X_test_pca[normal_mask, 1],
+            mode="markers",
+            name="Legitimate",
+            marker=dict(
+                size=5
+            ),
+        )
+    )
+
+    fig_pca.add_trace(
+        go.Scatter(
+            x=X_test_pca[fraud_mask, 0],
+            y=X_test_pca[fraud_mask, 1],
+            mode="markers",
+            name="Fraud",
+            marker=dict(
+                size=7
+            ),
+        )
+    )
+
+    fig_pca.update_layout(
+        title="PCA Feature Space",
+        xaxis_title="Principal Component 1",
+        yaxis_title="Principal Component 2",
+    )
+
+    st.plotly_chart(
+        fig_pca,
+        use_container_width=True,
+    )
+
+
+# ============================================================
+# QUANTUM FEATURE ENCODING
+# ============================================================
+
+st.header(
+    "3. Quantum Feature Encoding"
+)
+
+st.write(
+    """
+    PCA-compressed features are scaled into the interval
+    [0, π] so they can be mapped to quantum rotation angles.
+    """
+)
+
+angle_scaler = MinMaxScaler(
+    feature_range=(0, np.pi)
+)
+
+X_train_angles = angle_scaler.fit_transform(
+    X_train_pca
+)
+
+X_test_angles = angle_scaler.transform(
+    X_test_pca
+)
+
+
+st.write(
+    f"Quantum feature dimension: "
+    f"**{X_train_angles.shape[1]} qubits/features**"
+)
+
+
+# ============================================================
+# OPTIONAL QISKIT ENCODING
+# ============================================================
+
+def create_quantum_feature_circuit(features):
+
+    try:
+
+        from qiskit import QuantumCircuit
+
+        n_qubits = len(features)
+
+        circuit = QuantumCircuit(
+            n_qubits
+        )
+
+        for i, angle in enumerate(features):
+
+            circuit.ry(
+                float(angle),
+                i,
+            )
+
+        # Simple entanglement layer.
+        for i in range(
+            n_qubits - 1
+        ):
+
+            circuit.cx(
+                i,
+                i + 1,
+            )
+
+        return circuit
+
+    except Exception:
+
+        return None
+
+
+if st.checkbox(
+    "Show Qiskit quantum feature circuit"
+):
+
+    sample_angles = X_test_angles[0]
+
+    circuit = create_quantum_feature_circuit(
+        sample_angles
+    )
+
+    if circuit is not None:
+
+        st.code(
+            str(circuit.draw()),
+            language="text",
+        )
+
+    else:
+
+        st.warning(
+            "Qiskit is not installed. "
+            "The classical QRBM energy model can still run."
+        )
+
+
+# ============================================================
+# QRBM TRAINING
+# ============================================================
+
+st.header(
+    "4. QRBM Energy-Based Model"
+)
+
+st.write(
+    """
+    QuantumGuard learns the energy landscape of the
+    transaction data. Legitimate transactions should have
+    lower reconstruction energy, while anomalous transactions
+    should have higher energy.
+    """
+)
+
+train_button = st.button(
+    "Train QuantumGuard",
+    type="primary",
+)
+
+
+if train_button:
+
+    with st.spinner(
+        "Training QRBM energy model..."
+    ):
+
+        model = train_qrbm(
+            X_train_angles,
+            y_train,
+            n_hidden=n_hidden,
+            learning_rate=learning_rate,
+            epochs=epochs,
+            seed=42,
+        )
+
+        predictions, probabilities, energies = predict_qrbm(
+            model,
+            X_test_angles,
+            return_probabilities=True,
+        )
+
+    # --------------------------------------------------------
+    # Metrics
+    # --------------------------------------------------------
+
+    precision = precision_score(
+        y_test,
+        predictions,
+        zero_division=0,
+    )
+
+    recall = recall_score(
+        y_test,
+        predictions,
+        zero_division=0,
+    )
+
+    f1 = f1_score(
+        y_test,
+        predictions,
+        zero_division=0,
+    )
+
+    auprc = compute_auprc(
+        y_test,
+        probabilities,
+    )
+
+    fnr = compute_false_negative_rate(
+        y_test,
+        predictions,
+    )
+
+    threshold = model[
+        "threshold"
+    ]
+
+    # --------------------------------------------------------
+    # Store results
+    # --------------------------------------------------------
+
+    st.session_state[
+        "model"
+    ] = model
+
+    st.session_state[
+        "predictions"
+    ] = predictions
+
+    st.session_state[
+        "probabilities"
+    ] = probabilities
+
+    st.session_state[
+        "energies"
+    ] = energies
+
+    st.session_state[
+        "metrics"
+    ] = {
+        "Precision": precision,
+        "Recall": recall,
+        "F1-score": f1,
+        "AUPRC": auprc,
+        "False Negative Rate": fnr,
+    }
+
+    st.session_state[
+        "threshold"
+    ] = threshold
+
+
+# ============================================================
+# RESULTS
+# ============================================================
+
+if "metrics" in st.session_state:
+
+    st.header(
+        "5. Fraud Detection Results"
+    )
+
+    metrics = st.session_state[
+        "metrics"
+    ]
+
+    col1, col2, col3, col4, col5 = st.columns(5)
+
+    with col1:
+
+        st.metric(
+            "Precision",
+            f"{metrics['Precision']:.4f}"
+        )
+
+    with col2:
+
+        st.metric(
+            "Recall",
+            f"{metrics['Recall']:.4f}"
+        )
+
+    with col3:
+
+        st.metric(
+            "F1-score",
+            f"{metrics['F1-score']:.4f}"
+        )
+
+    with col4:
+
+        st.metric(
+            "AUPRC",
+            f"{metrics['AUPRC']:.4f}"
+        )
+
+    with col5:
+
+        st.metric(
+            "False Negative Rate",
+            f"{metrics['False Negative Rate']:.4f}"
+        )
+
+    st.divider()
+
+    # --------------------------------------------------------
+    # Energy Distribution
+    # --------------------------------------------------------
+
+    energies = st.session_state[
+        "energies"
+    ]
+
+    predictions = st.session_state[
+        "predictions"
+    ]
+
+    threshold = st.session_state[
+        "threshold"
+    ]
+
+    fig_energy = go.Figure()
+
+    fig_energy.add_trace(
+        go.Histogram(
+            x=energies[y_test == 0],
+            name="Legitimate",
+            opacity=0.7,
+        )
+    )
+
+    fig_energy.add_trace(
+        go.Histogram(
+            x=energies[y_test == 1],
+            name="Fraud",
+            opacity=0.7,
+        )
+    )
+
+    fig_energy.add_vline(
+        x=threshold,
+        line_dash="dash",
+        annotation_text="Fraud Threshold",
+    )
+
+    fig_energy.update_layout(
+        title="QRBM Energy Distribution",
+        xaxis_title="Energy Score",
+        yaxis_title="Transactions",
+        barmode="overlay",
+    )
+
+    st.plotly_chart(
+        fig_energy,
+        use_container_width=True,
+    )
+
+    # --------------------------------------------------------
+    # Confusion Matrix
+    # --------------------------------------------------------
+
+    st.subheader(
+        "Confusion Matrix"
+    )
+
+    cm = confusion_matrix(
+        y_test,
+        predictions,
+        labels=[0, 1],
+    )
+
+    fig_cm = go.Figure(
+        data=go.Heatmap(
+            z=cm,
+            x=[
+                "Predicted Legitimate",
+                "Predicted Fraud",
+            ],
+            y=[
+                "Actual Legitimate",
+                "Actual Fraud",
+            ],
+            text=cm,
+            texttemplate="%{text}",
+            colorscale="Blues",
+        )
+    )
+
+    fig_cm.update_layout(
+        title="Fraud Detection Confusion Matrix"
+    )
+
+    st.plotly_chart(
+        fig_cm,
+        use_container_width=True,
+    )
+
+    # --------------------------------------------------------
+    # Prediction Table
+    # --------------------------------------------------------
+
+    st.subheader(
+        "Transaction Predictions"
+    )
+
+    results_df = pd.DataFrame(
+        {
+            "Actual": y_test,
+            "Prediction": predictions,
+            "Energy Score": energies,
+            "Fraud Probability": st.session_state[
+                "probabilities"
+            ],
+        }
+    )
+
+    results_df[
+        "Actual"
+    ] = results_df[
+        "Actual"
+    ].map(
+        {
+            0: "Legitimate",
+            1: "Fraud",
+        }
+    )
+
+    results_df[
+        "Prediction"
+    ] = results_df[
+        "Prediction"
+    ].map(
+        {
+            0: "Legitimate",
+            1: "Fraud",
+        }
+    )
+
+    st.dataframe(
+        results_df.head(100),
+        use_container_width=True,
+    )
+
+    # --------------------------------------------------------
+    # Download Results
+    # --------------------------------------------------------
+
+    csv = results_df.to_csv(
+        index=False
+    )
+
+    st.download_button(
+        "Download Predictions CSV",
+        data=csv,
+        file_name="quantumguard_predictions.csv",
+        mime="text/csv",
+    )
+
+
+# ============================================================
+# PROJECT INFORMATION
+# ============================================================
+
+st.divider()
+
+st.header(
+    "About QuantumGuard"
+)
+
+st.markdown(
+    """
+    **QuantumGuard** is a hackathon prototype for
+    quantum-enhanced credit-card fraud detection.
+
+    ### Pipeline
+
+    `Raw Transactions`
+    → `Scaling`
+    → `PCA`
+    → `Quantum Feature Encoding`
+    → `QRBM Energy Model`
+    → `Energy Score`
+    → `Threshold`
+    → `Fraud / Legitimate`
+
+    ### Evaluation Metrics
+
+    - Precision
+    - Recall
+    - F1-score
+    - AUPRC
+    - False Negative Rate
+
+    The system emphasizes recall because missed fraudulent
+    transactions can be more costly than false alarms.
+    """
+)

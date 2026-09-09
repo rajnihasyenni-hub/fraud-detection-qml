@@ -1,119 +1,414 @@
 import numpy as np
-from sklearn.metrics import average_precision_score
 
+from sklearn.metrics import (
+    average_precision_score,
+    f1_score,
+    recall_score,
+)
+
+
+# ============================================================
+# Utility
+# ============================================================
 
 def _sigmoid(x):
-    x = np.clip(x, -500, 500)
+    x = np.clip(x, -50, 50)
     return 1.0 / (1.0 + np.exp(-x))
 
 
-def compute_auprc(y_true, y_score):
-    """Compute AUPRC for imbalanced fraud detection, where higher is better."""
-    y_true = np.asarray(y_true).astype(int).ravel()
-    y_score = np.asarray(y_score).ravel()
-    if y_true.size == 0:
+# ============================================================
+# Evaluation Metrics
+# ============================================================
+
+def compute_auprc(y_true, scores):
+    """
+    Calculate Area Under the Precision-Recall Curve.
+    """
+
+    y_true = np.asarray(y_true).astype(int)
+    scores = np.asarray(scores).astype(float)
+
+    if len(np.unique(y_true)) < 2:
         return 0.0
-    return float(average_precision_score(y_true, y_score))
+
+    return float(
+        average_precision_score(y_true, scores)
+    )
 
 
 def compute_false_negative_rate(y_true, y_pred):
-    """Return the fraction of actual fraud cases that were missed."""
-    y_true = np.asarray(y_true).astype(int).ravel()
-    y_pred = np.asarray(y_pred).astype(int).ravel()
-    if y_true.size == 0:
-        return 0.0
-    positives = np.sum(y_true == 1)
-    if positives == 0:
-        return 0.0
-    false_negatives = np.sum((y_true == 1) & (y_pred == 0))
-    return float(false_negatives / positives)
-
-
-def _energy_for_batch(model, X):
-    X_arr = np.asarray(X, dtype=float)
-    if X_arr.ndim == 1:
-        X_arr = X_arr.reshape(1, -1)
-
-    Xn = (X_arr - model["mean"]) / model["std"]
-    hidden = _sigmoid(Xn @ model["W"] + model["hb"])
-    reconstructed = _sigmoid(hidden @ model["W"].T + model["vb"])
-    return np.mean(np.abs(Xn - reconstructed), axis=1)
-
-
-def train_qrbm(X_train, y_train, n_hidden=8, learning_rate=0.05, epochs=40, seed=42):
-    """Train a compact quantum-inspired restricted Boltzmann model.
-
-    This implementation is intentionally lightweight and deterministic so that it can
-    run reliably in a Streamlit web app and provide a real QRBM-style energy model
-    without requiring a heavy external quantum stack.
     """
-    X = np.asarray(X_train, dtype=float)
-    if X.ndim == 1:
-        X = X.reshape(1, -1)
+    False Negative Rate = FN / (TP + FN)
+    """
 
-    if X.shape[0] == 0:
-        raise ValueError("X_train must contain at least one sample.")
+    y_true = np.asarray(y_true).astype(int)
+    y_pred = np.asarray(y_pred).astype(int)
+
+    actual_fraud = np.sum(y_true == 1)
+
+    if actual_fraud == 0:
+        return 0.0
+
+    false_negatives = np.sum(
+        (y_true == 1) & (y_pred == 0)
+    )
+
+    return float(false_negatives / actual_fraud)
+
+
+# ============================================================
+# Energy Function
+# ============================================================
+
+def _energy_for_batch(X, weights, hidden_bias, visible_bias):
+    """
+    Reconstruction-based anomaly energy.
+
+    Higher energy = more anomalous.
+    """
+
+    X = np.asarray(X, dtype=float)
+
+    hidden_prob = _sigmoid(
+        X @ weights + hidden_bias
+    )
+
+    reconstruction = np.tanh(
+        hidden_prob @ weights.T + visible_bias
+    )
+
+    energy = np.mean(
+        (X - reconstruction) ** 2,
+        axis=1
+    )
+
+    return energy
+
+
+# ============================================================
+# Probability Conversion
+# ============================================================
+
+def _energy_to_probability(energy, threshold):
+    """
+    Convert anomaly energy into a fraud probability.
+    """
+
+    scale = np.std(energy)
+
+    if scale < 1e-12:
+        scale = 1.0
+
+    probability = _sigmoid(
+        (energy - threshold) / scale
+    )
+
+    return probability
+
+
+# ============================================================
+# QRBM TRAINING
+# ============================================================
+
+def train_qrbm(
+    X,
+    y=None,
+    n_hidden=4,
+    learning_rate=0.03,
+    epochs=40,
+    seed=42,
+):
+    """
+    Train a lightweight QRBM-style energy model.
+
+    Parameters
+    ----------
+    X : array-like
+        Training features.
+
+    y : array-like, optional
+        Training labels used for threshold calibration.
+
+    n_hidden : int
+        Number of hidden units.
+
+    learning_rate : float
+        Learning rate.
+
+    epochs : int
+        Number of training epochs.
+
+    seed : int
+        Random seed.
+
+    Returns
+    -------
+    model : dict
+        Trained QRBM model.
+    """
+
+    X = np.asarray(X, dtype=float)
+
+    if X.ndim != 2:
+        raise ValueError(
+            "X must be a 2-dimensional feature matrix."
+        )
 
     rng = np.random.default_rng(seed)
-    mean = X.mean(axis=0)
-    std = X.std(axis=0)
-    std[std == 0] = 1.0
-    Xn = (X - mean) / std
 
-    n_visible = Xn.shape[1]
-    n_hidden = min(max(2, n_hidden), n_visible)
+    n_samples, n_features = X.shape
 
-    W = rng.normal(0.0, 0.2, size=(n_visible, n_hidden))
-    vb = np.zeros(n_visible)
-    hb = np.zeros(n_hidden)
+    n_hidden = max(
+        2,
+        min(int(n_hidden), 16)
+    )
+
+    # --------------------------------------------------------
+    # Initialize parameters
+    # --------------------------------------------------------
+
+    weights = rng.normal(
+        loc=0.0,
+        scale=0.05,
+        size=(n_features, n_hidden)
+    )
+
+    hidden_bias = np.zeros(n_hidden)
+
+    visible_bias = np.zeros(n_features)
+
+    # --------------------------------------------------------
+    # Contrastive-divergence-style training
+    # --------------------------------------------------------
 
     for _ in range(int(epochs)):
-        pos_hidden_prob = _sigmoid(Xn @ W + hb)
-        pos_hidden_state = pos_hidden_prob > rng.random(pos_hidden_prob.shape)
 
-        neg_visible_prob = _sigmoid(pos_hidden_state @ W.T + vb)
-        neg_hidden_prob = _sigmoid(neg_visible_prob @ W + hb)
+        # Positive phase
+        hidden_prob = _sigmoid(
+            X @ weights + hidden_bias
+        )
 
-        pos_association = Xn.T @ pos_hidden_prob
-        neg_association = neg_visible_prob.T @ neg_hidden_prob
+        # Reconstruction
+        reconstruction = np.tanh(
+            hidden_prob @ weights.T + visible_bias
+        )
 
-        W += learning_rate * (pos_association - neg_association) / Xn.shape[0]
-        vb += learning_rate * (Xn - neg_visible_prob).mean(axis=0)
-        hb += learning_rate * (pos_hidden_prob - neg_hidden_prob).mean(axis=0)
+        # Negative phase
+        hidden_reconstruction = _sigmoid(
+            reconstruction @ weights + hidden_bias
+        )
 
-    # Fix a threshold from the legitimate class if labels are supplied.
-    legitimate_mask = np.asarray(y_train) == 0
-    if legitimate_mask.any():
-        valid_X = Xn[legitimate_mask]
-        valid_hidden = _sigmoid(valid_X @ W + hb)
-        valid_recon = _sigmoid(valid_hidden @ W.T + vb)
-        energy = np.mean(np.abs(valid_X - valid_recon), axis=1)
-        threshold = float(np.median(energy))
-    else:
-        threshold = float(np.median(np.abs(Xn - _sigmoid(_sigmoid(Xn @ W + hb) @ W.T + vb))))
+        # Gradients
+        positive_gradient = (
+            X.T @ hidden_prob
+        ) / n_samples
+
+        negative_gradient = (
+            reconstruction.T
+            @ hidden_reconstruction
+        ) / n_samples
+
+        # Parameter updates
+        weights += learning_rate * (
+            positive_gradient
+            - negative_gradient
+        )
+
+        visible_bias += learning_rate * np.mean(
+            X - reconstruction,
+            axis=0
+        )
+
+        hidden_bias += learning_rate * np.mean(
+            hidden_prob
+            - hidden_reconstruction,
+            axis=0
+        )
+
+    # --------------------------------------------------------
+    # Calculate training energies
+    # --------------------------------------------------------
+
+    train_energy = _energy_for_batch(
+        X,
+        weights,
+        hidden_bias,
+        visible_bias
+    )
+
+    # Default threshold
+    threshold = float(
+        np.percentile(train_energy, 95)
+    )
+
+    # --------------------------------------------------------
+    # Supervised threshold calibration
+    # --------------------------------------------------------
+
+    if y is not None:
+
+        y = np.asarray(y).astype(int)
+
+        if len(y) == len(train_energy):
+
+            candidates = np.percentile(
+                train_energy,
+                np.linspace(70, 99, 30)
+            )
+
+            best_score = -1.0
+            best_threshold = threshold
+
+            for candidate in candidates:
+
+                predictions = (
+                    train_energy >= candidate
+                ).astype(int)
+
+                f1 = f1_score(
+                    y,
+                    predictions,
+                    zero_division=0
+                )
+
+                recall = recall_score(
+                    y,
+                    predictions,
+                    zero_division=0
+                )
+
+                # Give extra importance to recall
+                score = (
+                    0.7 * f1
+                    + 0.3 * recall
+                )
+
+                if score > best_score:
+
+                    best_score = score
+                    best_threshold = candidate
+
+            threshold = float(best_threshold)
+
+    # --------------------------------------------------------
+    # Model
+    # --------------------------------------------------------
 
     model = {
-        "W": W,
-        "vb": vb,
-        "hb": hb,
-        "mean": mean,
-        "std": std,
+        "weights": weights,
+        "hidden_bias": hidden_bias,
+        "visible_bias": visible_bias,
         "threshold": threshold,
         "n_hidden": n_hidden,
+        "n_features": n_features,
     }
+
     return model
 
 
-def predict_qrbm(model, X, return_probabilities=False):
-    """Predict labels for a batch of feature vectors using the trained QRBM energy score.
+# ============================================================
+# QRBM PREDICTION
+# ============================================================
 
-    By default this returns only the fraud/legitimate labels. Set
-    return_probabilities=True to also receive the soft confidence score.
+def predict_qrbm(
+    model,
+    X,
+    return_probabilities=True,
+):
     """
-    energy = _energy_for_batch(model, X)
-    pred = (energy > model["threshold"]).astype(int)
-    probs = np.clip(1.0 / (1.0 + np.exp(-(energy - model["threshold"]))), 1e-6, 1 - 1e-6)
+    Predict fraud using the trained QRBM.
+
+    Returns
+    -------
+    predictions
+        0 = legitimate
+        1 = fraud
+
+    probabilities
+        Fraud probability for each transaction
+
+    energies
+        QRBM anomaly energy
+    """
+
+    X = np.asarray(X, dtype=float)
+
+    weights = model["weights"]
+    hidden_bias = model["hidden_bias"]
+    visible_bias = model["visible_bias"]
+    threshold = model["threshold"]
+
+    # Calculate anomaly energy
+    energies = _energy_for_batch(
+        X,
+        weights,
+        hidden_bias,
+        visible_bias
+    )
+
+    # Convert energy to probability
+    probabilities = _energy_to_probability(
+        energies,
+        threshold
+    )
+
+    # Classification
+    predictions = (
+        energies >= threshold
+    ).astype(int)
 
     if return_probabilities:
-        return pred, probs, energy
-    return pred
+        return (
+            predictions,
+            probabilities,
+            energies
+        )
+
+    return predictions
+
+
+# ============================================================
+# TEST
+# ============================================================
+
+if __name__ == "__main__":
+
+    print("Testing QRBM...")
+
+    rng = np.random.default_rng(42)
+
+    X = rng.normal(
+        size=(200, 4)
+    )
+
+    y = np.zeros(200, dtype=int)
+
+    y[-20:] = 1
+
+    model = train_qrbm(
+        X,
+        y,
+        n_hidden=4,
+        learning_rate=0.03,
+        epochs=20,
+        seed=42,
+    )
+
+    predictions, probabilities, energies = predict_qrbm(
+        model,
+        X,
+        return_probabilities=True
+    )
+
+    print("QRBM IMPORT/TRAINING TEST PASSED")
+    print(
+        "AUPRC:",
+        compute_auprc(y, probabilities)
+    )
+    print(
+        "FNR:",
+        compute_false_negative_rate(
+            y,
+            predictions
+        )
+    )
