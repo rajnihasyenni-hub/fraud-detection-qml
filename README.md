@@ -173,7 +173,12 @@ python train_qrbm.py
 
 | Name | Role |
 |---|---|
-| _Add your name_ | _Add your role_ |
+| _Hasini_ | _Data & Preprocessing_ |
+| _Monisha_ | _Classical Baseline_ |
+| _Venu_ | _Quantum Feature Map_ |
+| _Pratap_ | _Quantum Kernel + SVM_ |
+| _Triveda_ | _Evaluation & Comparison_ |
+| _Nihas_ | _Git, Docs & Presentation_ |
 
 ---
 
