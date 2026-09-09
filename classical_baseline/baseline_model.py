@@ -8,6 +8,11 @@ benchmark that the quantum kernel model (Pratap/Venu) gets compared against.
 Dataset: Kaggle "Credit Card Fraud Detection"
 https://www.kaggle.com/datasets/mlg-ulb/creditcardfraud
 Download creditcard.csv and place it in the same folder as this script.
+
+FIX APPLIED: scaling is now fit ONLY on the training set and applied
+(not re-fit) to the test set, avoiding data leakage. Previously the
+scaler was fit on the full dataset before the split, letting test-set
+statistics leak into training.
 """
 
 import pandas as pd
@@ -32,27 +37,38 @@ print("Fraud cases:", df['Class'].sum(), "out of", len(df))
 print("Fraud %:", round(df['Class'].mean() * 100, 4), "%")
 
 # ---------------------------------------------------------
-# 2. Basic preprocessing
+# 2. Split FIRST, before any scaling — this is the fix.
+#    V1-V28 are already PCA-transformed by Kaggle (safe as-is).
+#    Only 'Amount' and 'Time' are raw and need scaling.
 # ---------------------------------------------------------
-# 'Amount' and 'Time' are not PCA-transformed like V1-V28, so scale them
-scaler = StandardScaler()
-df['Amount_scaled'] = scaler.fit_transform(df[['Amount']])
-df['Time_scaled'] = scaler.fit_transform(df[['Time']])
-
-df = df.drop(['Amount', 'Time'], axis=1)
-
 X = df.drop('Class', axis=1)
 y = df['Class']
 
-# ---------------------------------------------------------
-# 3. Train/test split (stratified — keep fraud ratio consistent)
-# ---------------------------------------------------------
 X_train, X_test, y_train, y_test = train_test_split(
     X, y, test_size=0.2, random_state=42, stratify=y
 )
 
 print("\nTrain shape:", X_train.shape, "  Test shape:", X_test.shape)
 print("Fraud in train:", y_train.sum(), "  Fraud in test:", y_test.sum())
+
+# ---------------------------------------------------------
+# 3. Scale Amount & Time — fit on TRAIN only, transform both
+#    (separate scaler per column keeps things explicit and safe)
+# ---------------------------------------------------------
+amount_scaler = StandardScaler()
+time_scaler = StandardScaler()
+
+X_train = X_train.copy()
+X_test = X_test.copy()
+
+X_train['Amount_scaled'] = amount_scaler.fit_transform(X_train[['Amount']])
+X_test['Amount_scaled'] = amount_scaler.transform(X_test[['Amount']])
+
+X_train['Time_scaled'] = time_scaler.fit_transform(X_train[['Time']])
+X_test['Time_scaled'] = time_scaler.transform(X_test[['Time']])
+
+X_train = X_train.drop(['Amount', 'Time'], axis=1)
+X_test = X_test.drop(['Amount', 'Time'], axis=1)
 
 # ---------------------------------------------------------
 # 4. Train Random Forest
