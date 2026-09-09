@@ -10,9 +10,14 @@ Run with:
     python tests/test_models.py
 """
 
+import os
 import sys
 import numpy as np
 import pandas as pd
+
+REPO_ROOT = os.path.dirname(os.path.dirname(__file__))
+if REPO_ROOT not in sys.path:
+    sys.path.insert(0, REPO_ROOT)
 
 print("Running sanity checks...\n")
 
@@ -92,7 +97,30 @@ def test_quantum_pipeline():
 
 
 # ---------------------------------------------------------
-# Test 4: Data file check (won't fail the suite, just warns)
+# Test 4: QRBM adapter loads and predicts without crashing
+# ---------------------------------------------------------
+def test_qrbm_pipeline():
+    try:
+        from quantum.qrbm import train_qrbm, predict_qrbm
+
+        rng = np.random.default_rng(42)
+        X = rng.normal(size=(120, 6))
+        y = np.array([0] * 60 + [1] * 60)
+        X = X + np.where(y[:, None] == 1, 2.0, -2.0)
+
+        model = train_qrbm(X, y)
+        preds = predict_qrbm(model, X[:10])
+
+        assert len(preds) == 10, "Prediction length mismatch"
+        print("[PASS] QRBM module loads and predicts correctly")
+        return True
+    except Exception as e:
+        print(f"[FAIL] QRBM pipeline broke: {e}")
+        return False
+
+
+# ---------------------------------------------------------
+# Test 5: Data file check (won't fail the suite, just warns)
 # ---------------------------------------------------------
 def test_dataset_present():
     import os
@@ -114,6 +142,7 @@ if __name__ == "__main__":
     results.append(test_imports())
     results.append(test_classical_pipeline())
     results.append(test_quantum_pipeline())
+    results.append(test_qrbm_pipeline())
     results.append(test_dataset_present())
 
     print("\n" + "=" * 50)
