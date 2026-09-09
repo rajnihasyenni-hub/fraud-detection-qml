@@ -20,7 +20,7 @@ from sklearn.preprocessing import MinMaxScaler, StandardScaler
 from sklearn.svm import SVC
 from sklearn.utils import resample
 
-from quantum.qrbm import predict_qrbm, train_qrbm
+from quantum.qrbm import compute_auprc, compute_false_negative_rate, predict_qrbm, train_qrbm
 
 # ============================================================
 # PAGE CONFIG + STYLING
@@ -172,12 +172,15 @@ def train_qrbm_model(df, n_qubits=N_QUBITS):
     )
 
     model = train_qrbm(X_train, y_train, n_hidden=6, learning_rate=0.08, epochs=50, seed=42)
-    preds, _ = predict_qrbm(model, X_test, return_probabilities=True)
+    preds, _, energy_scores = predict_qrbm(model, X_test, return_probabilities=True)
 
     metrics = {
         "precision": precision_score(y_test, preds, zero_division=0),
         "recall": recall_score(y_test, preds, zero_division=0),
         "f1": f1_score(y_test, preds, zero_division=0),
+        "auprc": compute_auprc(y_test, energy_scores),
+        "false_negative_rate": compute_false_negative_rate(y_test, preds),
+        "threshold": float(model["threshold"]),
     }
 
     return {"model": model, "pca": pca, "feature_columns": X.columns.tolist()}, metrics
@@ -186,8 +189,8 @@ def train_qrbm_model(df, n_qubits=N_QUBITS):
 def qrbm_predict_single(row_features, bundle):
     row = row_features[bundle["feature_columns"]].copy()
     reduced = bundle["pca"].transform(row.to_frame().T)
-    preds, probs = predict_qrbm(bundle["model"], reduced, return_probabilities=True)
-    return int(preds[0]), float(probs[0])
+    preds, probs, energy_scores = predict_qrbm(bundle["model"], reduced, return_probabilities=True)
+    return int(preds[0]), float(probs[0]), float(energy_scores[0])
 
 # ============================================================
 # QUANTUM KERNEL SVM
@@ -277,19 +280,31 @@ st.sidebar.write("Qiskit Fall Fest 2026 · CUTM Vizianagaram")
 if page == "📊 Dashboard":
     st.markdown("### Model Performance Comparison")
 
-    metric_cols = st.columns(3)
+    metric_cols = st.columns(5)
     for col, label, value in zip(
         metric_cols,
-        ["Precision", "Recall", "F1 Score"],
+        ["Precision", "Recall", "F1 Score", "AUPRC", "False Negative Rate"],
         [
             [classical_metrics["precision"], qrbm_metrics["precision"], quantum_metrics["precision"]],
             [classical_metrics["recall"], qrbm_metrics["recall"], quantum_metrics["recall"]],
             [classical_metrics["f1"], qrbm_metrics["f1"], quantum_metrics["f1"]],
+            [0.0, qrbm_metrics["auprc"], 0.0],
+            [0.0, qrbm_metrics["false_negative_rate"], 0.0],
         ],
     ):
         with col:
-            st.markdown(
-                f"""
+            if label in ["AUPRC", "False Negative Rate"]:
+                display_value = value[1]
+                formatted = f"{display_value:.2f}" if label == "AUPRC" else f"{display_value:.1%}"
+                markup = f"""
+                <div class="metric-card">
+                    <div style="color:#9CA3AF;font-size:0.82rem;">{label}</div>
+                    <div style="font-size:1.4rem;font-weight:700;">{formatted}</div>
+                    <div style="color:#7B61FF;font-size:0.75rem;">QRBM only</div>
+                </div>
+                """
+            else:
+                markup = f"""
                 <div class="metric-card">
                     <div style="color:#9CA3AF;font-size:0.82rem;">{label}</div>
                     <div style="font-size:1.5rem;font-weight:700;">
@@ -297,17 +312,16 @@ if page == "📊 Dashboard":
                     </div>
                     <div style="color:#7B61FF;font-size:0.75rem;">Classical · QRBM · Quantum</div>
                 </div>
-                """,
-                unsafe_allow_html=True,
-            )
+                """
+            st.markdown(markup, unsafe_allow_html=True)
 
     fig = go.Figure()
-    names = ["Precision", "Recall", "F1 Score"]
+    names = ["Precision", "Recall", "F1 Score", "AUPRC", "FNR"]
     fig.add_trace(
         go.Bar(
             name="Classical",
             x=names,
-            y=[classical_metrics["precision"], classical_metrics["recall"], classical_metrics["f1"]],
+            y=[classical_metrics["precision"], classical_metrics["recall"], classical_metrics["f1"], 0.0, 0.0],
             marker_color="#7B61FF",
         )
     )
@@ -315,7 +329,7 @@ if page == "📊 Dashboard":
         go.Bar(
             name="QRBM",
             x=names,
-            y=[qrbm_metrics["precision"], qrbm_metrics["recall"], qrbm_metrics["f1"]],
+            y=[qrbm_metrics["precision"], qrbm_metrics["recall"], qrbm_metrics["f1"], qrbm_metrics["auprc"], qrbm_metrics["false_negative_rate"]],
             marker_color="#36CFC9",
         )
     )
@@ -323,7 +337,7 @@ if page == "📊 Dashboard":
         go.Bar(
             name="Quantum Kernel SVM",
             x=names,
-            y=[quantum_metrics["precision"], quantum_metrics["recall"], quantum_metrics["f1"]],
+            y=[quantum_metrics["precision"], quantum_metrics["recall"], quantum_metrics["f1"], 0.0, 0.0],
             marker_color="#FF61D8",
         )
     )
@@ -339,8 +353,8 @@ if page == "📊 Dashboard":
     st.plotly_chart(fig, width="stretch")
 
     st.info(
-        "This dashboard matches the README concept: a hybrid quantum-classical fraud detection pipeline "
-        "that compares classical ML, a quantum energy-based QRBM, and a quantum kernel classifier."
+        "This dashboard follows the README: a hybrid quantum-classical fraud detector that optimizes for recall, "
+        "calibrates a QRBM energy threshold, and evaluates precision, F1, AUPRC, and false-negative rate under class imbalance."
     )
 
     fraud_count = int(df["Class"].sum())
@@ -381,7 +395,7 @@ elif page == "🔍 Live Detector":
         classical_proba = float(classical_model.predict_proba(d_row)[0][1])
 
         with st.spinner("Running QRBM + quantum kernel evaluation..."):
-            qrbm_pred, qrbm_proba = qrbm_predict_single(row_features, qrbm_bundle)
+            qrbm_pred, qrbm_proba, qrbm_energy = qrbm_predict_single(row_features, qrbm_bundle)
             quantum_pred, quantum_proba = quantum_predict_single(row_features, quantum_bundle)
 
         st.markdown("---")
@@ -409,6 +423,8 @@ elif page == "🔍 Live Detector":
                 '<span class="badge badge-fraud">FRAUD</span>' if qrbm_pred == 1 else '<span class="badge badge-legit">LEGITIMATE</span>',
                 unsafe_allow_html=True,
             )
+            st.caption(f"Energy score: {qrbm_energy:.4f}")
+            st.caption(f"Threshold: {qrbm_bundle['model']['threshold']:.4f}")
             st.caption(f"Confidence: {qrbm_proba:.1%}")
 
         with col_quantum:
@@ -427,17 +443,17 @@ else:
     st.write(
         "This project follows the README concept for a hybrid quantum-classical fraud detection system: "
         "scale the transaction features, reduce the dimensionality to a compact quantum-feasible representation, "
-        "and compare different decision models under class imbalance."
+        "calibrate a QRBM energy threshold, and compare different decision models under class imbalance."
     )
 
     st.markdown("#### 1. Data preparation")
-    st.write("The app uses the anonymized credit-card dataset, with normalisation for Amount and Time and a balanced sampling strategy for the quantum models.")
+    st.write("The app uses the anonymized credit-card dataset, with normalization for Amount and Time and balanced sampling for the quantum models to match the README’s class-imbalance handling strategy.")
 
     st.markdown("#### 2. Quantum feature encoding")
     st.write("The quantum kernel model uses a ZZFeatureMap to embed transaction patterns into a Hilbert-space representation suitable for quantum similarity analysis.")
 
     st.markdown("#### 3. QRBM energy model")
-    st.write("The QRBM is implemented as a lightweight energy-based anomaly detector that highlights transactions that deviate from the learned normal patterns and therefore behave like fraud.")
+    st.write("The QRBM is implemented as a lightweight energy-based anomaly detector: it learns the normal transaction energy landscape and flags outliers above a calibrated threshold as potential fraud.")
 
     st.markdown("#### 4. Evaluation")
-    st.write("The app reports precision, recall, and F1 score to match the project README’s fraud-detection objectives under class imbalance.")
+    st.write("The app reports precision, recall, F1 score, AUPRC, and false-negative rate to reflect the README’s focus on malignly imbalanced fraud detection and cost of missed fraud cases.")

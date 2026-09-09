@@ -120,7 +120,38 @@ def test_qrbm_pipeline():
 
 
 # ---------------------------------------------------------
-# Test 5: Data file check (won't fail the suite, just warns)
+# Test 5: QRBM energy metrics and threshold calibration work
+# ---------------------------------------------------------
+def test_qrbm_energy_metrics():
+    try:
+        from quantum.qrbm import compute_auprc, compute_false_negative_rate, train_qrbm
+
+        y_true = np.array([0, 0, 1, 1, 0, 1])
+        scores = np.array([0.05, 0.12, 0.88, 0.91, 0.15, 0.77])
+
+        auprc = compute_auprc(y_true, scores)
+        fnr = compute_false_negative_rate(y_true, np.array([0, 0, 1, 1, 0, 0]))
+
+        assert 0.0 <= auprc <= 1.0, "AUPRC should stay between 0 and 1"
+        assert 0.0 <= fnr <= 1.0, "FNR should stay between 0 and 1"
+
+        rng = np.random.default_rng(7)
+        X = rng.normal(size=(160, 6))
+        y = np.array([0] * 120 + [1] * 40)
+        X = X + np.where(y[:, None] == 1, 3.0, -1.0)
+
+        model = train_qrbm(X, y)
+        assert "threshold" in model and model["threshold"] >= 0.0, "QRBM threshold missing or invalid"
+
+        print("[PASS] QRBM energy metrics and threshold calibration work")
+        return True
+    except Exception as e:
+        print(f"[FAIL] QRBM energy metrics failed: {e}")
+        return False
+
+
+# ---------------------------------------------------------
+# Test 6: Data file check (won't fail the suite, just warns)
 # ---------------------------------------------------------
 def test_dataset_present():
     import os
@@ -143,6 +174,7 @@ if __name__ == "__main__":
     results.append(test_classical_pipeline())
     results.append(test_quantum_pipeline())
     results.append(test_qrbm_pipeline())
+    results.append(test_qrbm_energy_metrics())
     results.append(test_dataset_present())
 
     print("\n" + "=" * 50)

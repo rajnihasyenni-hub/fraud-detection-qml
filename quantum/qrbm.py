@@ -1,9 +1,43 @@
 import numpy as np
+from sklearn.metrics import average_precision_score
 
 
 def _sigmoid(x):
     x = np.clip(x, -500, 500)
     return 1.0 / (1.0 + np.exp(-x))
+
+
+def compute_auprc(y_true, y_score):
+    """Compute AUPRC for imbalanced fraud detection, where higher is better."""
+    y_true = np.asarray(y_true).astype(int).ravel()
+    y_score = np.asarray(y_score).ravel()
+    if y_true.size == 0:
+        return 0.0
+    return float(average_precision_score(y_true, y_score))
+
+
+def compute_false_negative_rate(y_true, y_pred):
+    """Return the fraction of actual fraud cases that were missed."""
+    y_true = np.asarray(y_true).astype(int).ravel()
+    y_pred = np.asarray(y_pred).astype(int).ravel()
+    if y_true.size == 0:
+        return 0.0
+    positives = np.sum(y_true == 1)
+    if positives == 0:
+        return 0.0
+    false_negatives = np.sum((y_true == 1) & (y_pred == 0))
+    return float(false_negatives / positives)
+
+
+def _energy_for_batch(model, X):
+    X_arr = np.asarray(X, dtype=float)
+    if X_arr.ndim == 1:
+        X_arr = X_arr.reshape(1, -1)
+
+    Xn = (X_arr - model["mean"]) / model["std"]
+    hidden = _sigmoid(Xn @ model["W"] + model["hb"])
+    reconstructed = _sigmoid(hidden @ model["W"].T + model["vb"])
+    return np.mean(np.abs(Xn - reconstructed), axis=1)
 
 
 def train_qrbm(X_train, y_train, n_hidden=8, learning_rate=0.05, epochs=40, seed=42):
@@ -76,18 +110,10 @@ def predict_qrbm(model, X, return_probabilities=False):
     By default this returns only the fraud/legitimate labels. Set
     return_probabilities=True to also receive the soft confidence score.
     """
-    X_arr = np.asarray(X, dtype=float)
-    if X_arr.ndim == 1:
-        X_arr = X_arr.reshape(1, -1)
-
-    Xn = (X_arr - model["mean"]) / model["std"]
-    hidden = _sigmoid(Xn @ model["W"] + model["hb"])
-    reconstructed = _sigmoid(hidden @ model["W"].T + model["vb"])
-    energy = np.mean(np.abs(Xn - reconstructed), axis=1)
-
+    energy = _energy_for_batch(model, X)
     pred = (energy > model["threshold"]).astype(int)
     probs = np.clip(1.0 / (1.0 + np.exp(-(energy - model["threshold"]))), 1e-6, 1 - 1e-6)
 
     if return_probabilities:
-        return pred, probs
+        return pred, probs, energy
     return pred
